@@ -1,62 +1,88 @@
 package com.framework.core;
 
-import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.BiConsumer;
 
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServlet;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import java.io.*;
+import java.lang.reflect.Method;
+import java.util.List;
 
+import com.framework.annotation.AnnotationScanner;
+import com.framework.annotation.AppClass;
+import com.framework.annotation.MonAnnotation;
+
+import jakarta.servlet.*;
+import jakarta.servlet.annotation.*;
+import jakarta.servlet.http.*;
+
+// @WebServlet("/")
 public class FrontServlet extends HttpServlet {
-
-    // Map pour stocker les routes dynamiques
-    private Map<String, BiConsumer<HttpServletRequest, HttpServletResponse>> routes = new HashMap<>();
+    
+    RequestDispatcher defaultDispatcher;
 
     @Override
-    public void init() throws ServletException {
-        super.init();
-
-        // Définir les routes ici
-        routes.put("/glo", this::handleGlo);
-        routes.put("/hello", this::handleHello);
-        // Ajouter d'autres routes facilement
+    public void init() {
+        defaultDispatcher = getServletContext().getNamedDispatcher("default");
     }
 
     @Override
-    protected void service(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+    protected void service(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
         String path = req.getRequestURI().substring(req.getContextPath().length());
+        
+        boolean resourceExists = getServletContext().getResource(path) != null;
 
-        // Chercher la route correspondante
-        BiConsumer<HttpServletRequest, HttpServletResponse> handler = routes.get(path);
-
-        if (handler != null) {
-            handler.accept(req, resp); // exécuter la route
+        if (resourceExists) {
+            defaultServe(req, res);
         } else {
-            // Si pas de route correspondante → page par défaut
-            resp.setContentType("text/plain");
-            resp.getWriter().println("Page not found: " + path);
+            customServe(req, res);
         }
     }
 
-    // Exemple de méthodes pour chaque route
-    private void handleGlo(HttpServletRequest req, HttpServletResponse resp) {
-        try {
-            resp.setContentType("text/plain");
-            resp.getWriter().println("Welcome to /glo!");
-        } catch (IOException e) {
-            e.printStackTrace();
+
+    private void customServe(HttpServletRequest req, HttpServletResponse res) throws IOException {
+
+        res.setContentType("text/html;charset=UTF-8");
+        res.setCharacterEncoding("UTF-8");
+        PrintWriter out = res.getWriter();
+
+        String url = req.getPathInfo();
+        if (url == null) {
+            url = req.getRequestURI().substring(req.getContextPath().length());
+        }
+
+        boolean found = false;
+
+        // 🔍 Scanner les classes annotées @AppClass dans ton package test
+        List<Class<?>> annotatedClasses = AnnotationScanner.getAnnotatedClasses("com.test", AppClass.class);
+
+        for (Class<?> clazz : annotatedClasses) {
+            Method method = AnnotationScanner.findMethodByUrl(clazz, MonAnnotation.class, url);
+            if (method != null) {
+                try {
+                    Object instance = clazz.getDeclaredConstructor().newInstance();
+                    Object result = method.invoke(instance);
+
+                    out.println("<html><body>");
+                    out.println("<h3>Classe : " + clazz.getSimpleName() + "</h3>");
+                    out.println("<h4>Methode : " + method.getName() + "</h4>");
+                    out.println("<p>Resultat : " + (result != null ? result : "(aucun retour)") + "</p>");
+                    out.println("</body></html>");
+                    found = true;
+                    break;
+                } catch (Exception e) {
+                    e.printStackTrace(out);
+                }
+            }
+        }
+
+        if (!found) {
+            out.println("<html><body>");
+            out.println("<p>Aucune methode ni classe associee a cette URL : " + url + "</p>");
+            out.println("</body></html>");
         }
     }
 
-    private void handleHello(HttpServletRequest req, HttpServletResponse resp) {
-        try {
-            resp.setContentType("text/plain");
-            resp.getWriter().println("Hello world route!");
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+
+
+    private void defaultServe(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
+        defaultDispatcher.forward(req, res);
     }
 }
