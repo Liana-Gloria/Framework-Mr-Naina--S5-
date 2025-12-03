@@ -14,6 +14,7 @@ import jakarta.servlet.annotation.*;
 import jakarta.servlet.http.*;
 
 // @WebServlet("/")
+// Front
 public class FrontServlet extends HttpServlet {
     
     RequestDispatcher defaultDispatcher;
@@ -64,7 +65,12 @@ public class FrontServlet extends HttpServlet {
                     Object instance = clazz.getDeclaredConstructor().newInstance();
 
                     // 3 – Exécution de la méthode du contrôleur
-                    Object result = method.invoke(instance);
+                    // Sprint 3-ter : on passe null pour tous les paramètres
+                    int paramCount = method.getParameterCount();
+                    Object[] args = new Object[paramCount];  // Tableau rempli de null
+                                    
+                    Object result = method.invoke(instance, args);
+
 
                     // 4 – Gestion selon type retour
                     if (result instanceof String) {
