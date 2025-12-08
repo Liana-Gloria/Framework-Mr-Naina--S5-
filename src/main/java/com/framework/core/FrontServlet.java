@@ -1,20 +1,11 @@
 package com.framework.core;
 
 import java.io.*;
-import java.lang.reflect.Method;
-import java.lang.reflect.Parameter;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.regex.*;
 
-import com.framework.annotation.AnnotationScanner;
-import com.framework.annotation.Controller;
-import com.framework.annotation.GetMapping;
-import com.framework.annotation.PostMapping;
-import com.framework.annotation.URL;
-
+import com.framework.annotation.*;
 import jakarta.servlet.*;
 import jakarta.servlet.http.*;
 
@@ -28,49 +19,60 @@ public class FrontServlet extends HttpServlet {
     }
 
     @Override
-    protected void service(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
+    protected void service(HttpServletRequest req, HttpServletResponse res)
+            throws ServletException, IOException {
+
         String path = req.getRequestURI().substring(req.getContextPath().length());
         boolean resourceExists = getServletContext().getResource(path) != null;
 
-        if (resourceExists) {
-            defaultServe(req, res);
-        } else {
-            customServe(req, res);
-        }
+        if (resourceExists) defaultServe(req, res);
+        else customServe(req, res);
     }
 
     private void customServe(HttpServletRequest req, HttpServletResponse res) throws IOException, ServletException {
         res.setContentType("text/html; charset=UTF-8");
         res.setCharacterEncoding("UTF-8");
+    }
 
+    private String extractUrl(HttpServletRequest req) {
         String url = req.getPathInfo();
-        if (url == null) {
+        if (url == null)
             url = req.getRequestURI().substring(req.getContextPath().length());
-        }
+        return url;
+    }
 
-        boolean found = false;
+    private Method resolveMethod(Class<?> clazz, HttpServletRequest req, String url) {
 
         List<Class<?>> annotatedClasses = AnnotationScanner.getAnnotatedClasses("com.test.controllers", Controller.class);
 
         for (Class<?> clazz : annotatedClasses) {
             Method method = null;
 
-            // 2 – Trouver la méthode correspondant à l'URL via ton annotation (@MonAnnotation)
-            Method method = null;
+        if (m == null && req.getMethod().equalsIgnoreCase("POST"))
+            m = AnnotationScanner.findMethodByUrl(clazz, PostMapping.class, url);
 
-            // 1️⃣ @URL (ancienne compatibilité)
-            method = AnnotationScanner.findMethodByUrl(clazz, URL.class, url);
+        return m;
+    }
 
-            // 2️⃣ Si GET, vérifier @GetMapping
-            if (method == null && "GET".equalsIgnoreCase(req.getMethod())) {
-                method = AnnotationScanner.findMethodByUrl(clazz, com.framework.annotation.GetMapping.class, url);
-            }
+    private Object processControllerMethod(Class<?> clazz, Method method,
+                                           HttpServletRequest req,
+                                           HttpServletResponse res,
+                                           String url) throws Exception {
 
-            // 3️⃣ Si POST, vérifier @PostMapping
-            if (method == null && "POST".equalsIgnoreCase(req.getMethod())) {
-                method = AnnotationScanner.findMethodByUrl(clazz, com.framework.annotation.PostMapping.class, url);
-            }
+        Object instance = clazz.getDeclaredConstructor().newInstance();
+        Object[] args = resolveMethodArguments(method, req, url);
+        return method.invoke(instance, args);
+    }
 
+    private Object[] resolveMethodArguments(Method method, HttpServletRequest req, String url) throws Exception {
+
+        Parameter[] params = method.getParameters();
+        Object[] args = new Object[params.length];
+
+        String pattern = getUrlPattern(method);
+        Map<String, String> pathVariables = extractPathVariables(pattern, url);
+
+        for (int i = 0; i < params.length; i++) {
 
             if (method != null) {
                 found = true;
@@ -173,12 +175,27 @@ public class FrontServlet extends HttpServlet {
                     e.printStackTrace(res.getWriter());
                     return;
                 }
+                value = array;
             }
+            else if (isComplexObject(type)) {
+                value = DataBinder.bindComplexObject(type, p.getName(), req.getParameterMap());
+            }
+            else {
+                // Récupération générique depuis les paramètres POST
+                String param = req.getParameter(p.getName());
+                if (param != null) value = convert(param, type);
+            }
+
+            if (value == null) value = defaultValue(type);
+            args[i] = value;
         }
+        return args;
+    }
 
         if (!found) {
             res.getWriter().println("<p>Aucune methode ou classe associee à l URL : " + url + "</p>");
         }
+        return max;
     }
 
     private void defaultServe(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
@@ -199,15 +216,14 @@ public class FrontServlet extends HttpServlet {
     private Map<String, String> extractPathVariables(String pattern, String url) {
         Map<String, String> vars = new HashMap<>();
         String regex = pattern.replaceAll("\\{[^/]+\\}", "([^/]+)");
+
         Pattern p = Pattern.compile(regex);
         Matcher m = p.matcher(url);
 
         if (m.matches()) {
             Matcher mNames = Pattern.compile("\\{([^/]+)\\}").matcher(pattern);
             int i = 1;
-            while (mNames.find()) {
-                vars.put(mNames.group(1), m.group(i++));
-            }
+            while (mNames.find()) vars.put(mNames.group(1), m.group(i++));
         }
         return vars;
     }
