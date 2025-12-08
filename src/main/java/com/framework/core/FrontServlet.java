@@ -29,43 +29,7 @@ public class FrontServlet extends HttpServlet {
         else customServe(req, res);
     }
 
-    private void customServe(HttpServletRequest req, HttpServletResponse res)
-            throws IOException, ServletException {
-
-        prepareResponse(res);
-
-        String url = extractUrl(req);
-        boolean found = false;
-
-        List<Class<?>> controllers =
-                AnnotationScanner.getAnnotatedClasses("com.test.controllers", Controller.class);
-
-        for (Class<?> clazz : controllers) {
-
-            Method method = resolveMethod(clazz, req, url);
-            if (method == null) continue;
-
-            found = true;
-
-            try {
-                Object result = processControllerMethod(clazz, method, req, res, url);
-
-                if (result != null) handleReturn(result, req, res);
-                return;
-
-            } catch (Exception e) {
-                e.printStackTrace(res.getWriter());
-                return;
-            }
-        }
-
-        if (!found)
-            res.getWriter().println("<p>Aucune methode pour l URL : " + url + "</p>");
-    }
-
-    /* ---------------- METHODES SEPARÉES ---------------- */
-
-    private void prepareResponse(HttpServletResponse res) {
+    private void customServe(HttpServletRequest req, HttpServletResponse res) throws IOException, ServletException {
         res.setContentType("text/html; charset=UTF-8");
         res.setCharacterEncoding("UTF-8");
     }
@@ -79,10 +43,10 @@ public class FrontServlet extends HttpServlet {
 
     private Method resolveMethod(Class<?> clazz, HttpServletRequest req, String url) {
 
-        Method m = AnnotationScanner.findMethodByUrl(clazz, URL.class, url);
+        List<Class<?>> annotatedClasses = AnnotationScanner.getAnnotatedClasses("com.test.controllers", Controller.class);
 
-        if (m == null && req.getMethod().equalsIgnoreCase("GET"))
-            m = AnnotationScanner.findMethodByUrl(clazz, GetMapping.class, url);
+        for (Class<?> clazz : annotatedClasses) {
+            Method method = null;
 
         if (m == null && req.getMethod().equalsIgnoreCase("POST"))
             m = AnnotationScanner.findMethodByUrl(clazz, PostMapping.class, url);
@@ -110,30 +74,106 @@ public class FrontServlet extends HttpServlet {
 
         for (int i = 0; i < params.length; i++) {
 
-            Parameter p = params[i];
-            Class<?> type = p.getType();
-            Object value = null;
+            if (method != null) {
+                found = true;
+                try {
+                    Object instance = clazz.getDeclaredConstructor().newInstance();
+                    Parameter[] params = method.getParameters();
+                    Object[] args = new Object[params.length];
 
-            if (Map.class.isAssignableFrom(type)) {
-                value = buildMapParam(req);
-            }
-            else if (pathVariables.containsKey(p.getName())) {
-                value = convert(pathVariables.get(p.getName()), type);
-            }
-            else if (p.isAnnotationPresent(RequestParam.class)) {
-                value = convert(req.getParameter(
-                        p.getAnnotation(RequestParam.class).value()), type);
-            }
-            else if (type.isArray()) {
-                // Gestion des tableaux (ex : Employee[])
-                Class<?> componentType = type.getComponentType();
-                int maxIndex = detectMaxIndex(p.getName(), req.getParameterMap());
-                Object array = Array.newInstance(componentType, maxIndex + 1);
+                    // Récupérer les variables {var} depuis l'URL
+                    String urlPattern;
+                    if (method.isAnnotationPresent(URL.class)) {
+                        urlPattern = method.getAnnotation(URL.class).url();
+                    } else if (method.isAnnotationPresent(GetMapping.class)) {
+                        urlPattern = method.getAnnotation(GetMapping.class).value();
+                    } else if (method.isAnnotationPresent(PostMapping.class)) {
+                        urlPattern = method.getAnnotation(PostMapping.class).value();
+                    } else {
+                        urlPattern = url; // fallback
+                    }
 
-                for (int j = 0; j <= maxIndex; j++) {
-                    String prefix = p.getName() + "[" + j + "]";
-                    Object element = DataBinder.bindComplexObject(componentType, prefix, req.getParameterMap());
-                    Array.set(array, j, element);
+                    // 3 – Exécution de la méthode du contrôleur
+                    // Sprint 6 : injection sécurisée des arguments depuis request
+                    // Récupération des variables dynamiques de l'URL
+                    Parameter[] params = method.getParameters();
+                    Object[] args = new Object[params.length];
+
+                    // Récupérer les variables {var} depuis l'URL
+                    String urlPattern;
+                    if (method.isAnnotationPresent(URL.class)) {
+                        urlPattern = method.getAnnotation(URL.class).url();
+                    } else if (method.isAnnotationPresent(GetMapping.class)) {
+                        urlPattern = method.getAnnotation(GetMapping.class).value();
+                    } else if (method.isAnnotationPresent(PostMapping.class)) {
+                        urlPattern = method.getAnnotation(PostMapping.class).value();
+                    } else {
+                        urlPattern = url; // fallback
+                    }
+
+                    Map<String, String> pathVariables = extractPathVariables(urlPattern, url);
+
+                    for (int i = 0; i < params.length; i++) {
+                        Parameter p = params[i];
+                        Class<?> type = p.getType();
+                        Object value = null;
+                    
+                        // 1️⃣ Priorité : {var} dans l'URL
+                        if (pathVariables.containsKey(p.getName())) {
+                            value = convert(pathVariables.get(p.getName()), type);
+                        }
+                    
+                        // 2️⃣ Priorité : @RequestParam
+                        if (value == null && p.isAnnotationPresent(com.framework.annotation.RequestParam.class)) {
+                            String key = p.getAnnotation(com.framework.annotation.RequestParam.class).value();
+                            String raw = req.getParameter(key);
+                            if (raw != null) value = convert(raw, type);
+                        }
+                    
+                        // 3️⃣ Valeur par défaut
+                        if (value == null) {
+                            if (type == int.class) value = 0;
+                            else if (type == double.class) value = 0.0;
+                            else if (type == float.class) value = 0f;
+                            else if (type == boolean.class) value = false;
+                            else value = null;
+                        }
+                    
+                        args[i] = value;
+                    }
+
+
+                    // Appel de la méthode avec les arguments sécurisés
+                    Object result = method.invoke(instance, args);
+
+                        args[i] = value;
+                    }
+
+                    Object result = method.invoke(instance, args);
+
+                    // Gestion du retour
+                    if (result instanceof String) {
+                        res.getWriter().print((String) result);
+                        return;
+                    } else if (result instanceof ModelView) {
+                        ModelView mv = (ModelView) result;
+                        String viewName = mv.getView();
+
+                        for (String key : mv.getData().keySet()) {
+                            req.setAttribute(key, mv.getData().get(key));
+                        }
+
+                        RequestDispatcher dispatcher = req.getRequestDispatcher("/views/" + viewName);
+                        dispatcher.forward(req, res);
+                        return;
+                    } else {
+                        res.getWriter().println("⚠️ Type de retour non supporté : " + result);
+                        return;
+                    }
+
+                } catch (Exception e) {
+                    e.printStackTrace(res.getWriter());
+                    return;
                 }
                 value = array;
             }
@@ -152,83 +192,24 @@ public class FrontServlet extends HttpServlet {
         return args;
     }
 
-    /** Détecte le plus grand index présent dans paramMap pour un tableau donné */
-    private int detectMaxIndex(String paramName, Map<String, String[]> paramMap) {
-        int max = -1;
-        for (String key : paramMap.keySet()) {
-            if (key.startsWith(paramName + "[")) {
-                int i1 = key.indexOf("[") + 1;
-                int i2 = key.indexOf("]");
-                int idx = Integer.parseInt(key.substring(i1, i2));
-                if (idx > max) max = idx;
-            }
+        if (!found) {
+            res.getWriter().println("<p>Aucune methode ou classe associee à l URL : " + url + "</p>");
         }
         return max;
     }
 
-
-    private boolean isComplexObject(Class<?> type) {
-        return !type.isPrimitive()
-                && type != String.class
-                && !Number.class.isAssignableFrom(type)
-                && !Map.class.isAssignableFrom(type);
-    }
-
-    private Map<String, Object> buildMapParam(HttpServletRequest req) {
-        Map<String, Object> map = new HashMap<>();
-        req.getParameterMap().forEach((k, v) -> map.put(k, v.length == 1 ? v[0] : v));
-        return map;
-    }
-
-    private String getUrlPattern(Method method) {
-        if (method.isAnnotationPresent(URL.class)) return method.getAnnotation(URL.class).url();
-        if (method.isAnnotationPresent(GetMapping.class)) return method.getAnnotation(GetMapping.class).value();
-        if (method.isAnnotationPresent(PostMapping.class)) return method.getAnnotation(PostMapping.class).value();
-        return "";
-    }
-
-    private void handleReturn(Object result, HttpServletRequest req, HttpServletResponse res)
-            throws ServletException, IOException {
-
-        if (result instanceof String) {
-            res.getWriter().print(result);
-            return;
-        }
-
-        if (result instanceof ModelView) {
-            ModelView mv = (ModelView) result;
-
-            mv.getData().forEach(req::setAttribute);
-
-            req.getRequestDispatcher("/views/" + mv.getView())
-                    .forward(req, res);
-            return;
-        }
-
-        res.getWriter().println(" Type de retour non supporte : " + result);
-    }
-
-    private void defaultServe(HttpServletRequest req, HttpServletResponse res)
-            throws ServletException, IOException {
+    private void defaultServe(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
         defaultDispatcher.forward(req, res);
     }
 
-    private Object convert(String raw, Class<?> type) {
+    private Object convert(String rawValue, Class<?> type) {
         try {
-            if (type == String.class) return raw;
-            if (type == int.class || type == Integer.class) return Integer.parseInt(raw);
-            if (type == double.class || type == Double.class) return Double.parseDouble(raw);
-            if (type == float.class || type == Float.class) return Float.parseFloat(raw);
-            if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(raw);
+            if (type == String.class) return rawValue;
+            if (type == int.class || type == Integer.class) return Integer.parseInt(rawValue);
+            if (type == double.class || type == Double.class) return Double.parseDouble(rawValue);
+            if (type == float.class || type == Float.class) return Float.parseFloat(rawValue);
+            if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(rawValue);
         } catch (Exception e) {}
-        return null;
-    }
-
-    private Object defaultValue(Class<?> t) {
-        if (t == int.class) return 0;
-        if (t == double.class) return 0.0;
-        if (t == float.class) return 0f;
-        if (t == boolean.class) return false;
         return null;
     }
 
@@ -244,7 +225,6 @@ public class FrontServlet extends HttpServlet {
             int i = 1;
             while (mNames.find()) vars.put(mNames.group(1), m.group(i++));
         }
-
         return vars;
     }
 }
