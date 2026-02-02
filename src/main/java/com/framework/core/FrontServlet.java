@@ -10,8 +10,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import jakarta.servlet.*;
+import jakarta.servlet.annotation.MultipartConfig;
 import jakarta.servlet.http.*;
 
+@MultipartConfig
 public class FrontServlet extends HttpServlet {
 
     private RequestDispatcher defaultDispatcher;
@@ -51,10 +53,8 @@ public class FrontServlet extends HttpServlet {
             found = true;
 
             try {
-                Object result = processControllerMethod(clazz, method, req, res, url);
-
-                if (result != null) handleReturn(result, req, res, method);
-                return;
+                ControllerResult cr = processControllerMethod(clazz, method, req, res, url);
+                handleReturn(cr, req, res, method);
 
             } catch (Exception e) {
                 e.printStackTrace(res.getWriter());
@@ -93,67 +93,128 @@ public class FrontServlet extends HttpServlet {
         return m;
     }
 
-    private Object processControllerMethod(Class<?> clazz, Method method,
-                                           HttpServletRequest req,
-                                           HttpServletResponse res,
-                                           String url) throws Exception {
+    private ControllerResult processControllerMethod(Class<?> clazz,
+                                                     Method method,
+                                                     HttpServletRequest req,
+                                                     HttpServletResponse res,
+                                                     String url) throws Exception {
 
         Object instance = clazz.getDeclaredConstructor().newInstance();
         Object[] args = resolveMethodArguments(method, req, url);
-        return method.invoke(instance, args);
+        Object result = method.invoke(instance, args);
+
+        return new ControllerResult(result, args);
     }
 
-    private Object[] resolveMethodArguments(Method method, HttpServletRequest req, String url) throws Exception {
 
+    private Object[] resolveMethodArguments(Method method, HttpServletRequest req, String url) throws Exception {
         Parameter[] params = method.getParameters();
         Object[] args = new Object[params.length];
-
+    
         String pattern = getUrlPattern(method);
         Map<String, String> pathVariables = extractPathVariables(pattern, url);
-
+    
+        boolean isMultipart = req.getContentType() != null &&
+                req.getContentType().toLowerCase().startsWith("multipart/");
+    
+        Map<String, Part> partsMap = new HashMap<>();
+        Map<String, byte[]> bytesMap = new HashMap<>();
+    
+        // ✅ Dossier uploads persistant dans le projet (pas le tmp de Tomcat)
+        File projectDir = new File(System.getProperty("user.dir"));
+        File uploadDir = new File(projectDir, "uploads");
+        if (!uploadDir.exists()) uploadDir.mkdirs();
+    
+        if (isMultipart) {
+            for (Part p : req.getParts()) {
+                String originalName = p.getSubmittedFileName();
+                if (originalName != null) {
+                    // Nettoyage du nom
+                    String cleanName = originalName.replaceAll("[^a-zA-Z0-9\\.\\-_]", "_");
+                    // Nom unique pour éviter les conflits
+                    String finalName = System.currentTimeMillis() + "_" + cleanName;
+                    File fileOnDisk = new File(uploadDir, finalName);
+                
+                    // ⚡ Sauvegarde physique du fichier
+                    try (InputStream is = p.getInputStream();
+                         OutputStream os = new FileOutputStream(fileOnDisk)) {
+                        byte[] buffer = new byte[8192];
+                        int len;
+                        while ((len = is.read(buffer)) > 0) {
+                            os.write(buffer, 0, len);
+                        }
+                    }
+                
+                    // Remplace Part par le fichier sur disque si nécessaire
+                    partsMap.put(p.getName(), p);
+                }
+            
+                // Stockage en mémoire (byte[]) pour Map<String, byte[]>
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try (InputStream is = p.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int len;
+                    while ((len = is.read(buffer)) > 0) {
+                        baos.write(buffer, 0, len);
+                    }
+                }
+                bytesMap.put(p.getName(), baos.toByteArray());
+            }
+        }
+    
+        // Traitement des paramètres de la méthode
         for (int i = 0; i < params.length; i++) {
-
             Parameter p = params[i];
             Class<?> type = p.getType();
             Object value = null;
-
-            if (Map.class.isAssignableFrom(type)) {
+        
+            if (Map.class.isAssignableFrom(type) && !isMultipart) {
                 value = buildMapParam(req);
-            }
-            else if (pathVariables.containsKey(p.getName())) {
+            } else if (type == Part.class && isMultipart) {
+                value = partsMap.get(p.getName());
+            } else if (type == Part[].class && isMultipart) {
+                List<Part> list = new ArrayList<>();
+                for (String key : partsMap.keySet()) {
+                    if (key.equals(p.getName()) || key.startsWith(p.getName() + "[")) {
+                        list.add(partsMap.get(key));
+                    }
+                }
+                value = list.toArray(new Part[0]);
+            } else if (type == Map.class && isMultipart) {
+                value = bytesMap;
+            } else if (pathVariables.containsKey(p.getName())) {
                 value = convert(pathVariables.get(p.getName()), type);
-            }
-            else if (p.isAnnotationPresent(RequestParam.class)) {
-                value = convert(req.getParameter(
-                        p.getAnnotation(RequestParam.class).value()), type);
-            }
-            else if (type.isArray()) {
-                // Gestion des tableaux (ex : Employee[])
+            } else if (p.isAnnotationPresent(RequestParam.class)) {
+                value = convert(req.getParameter(p.getAnnotation(RequestParam.class).value()), type);
+            } else if (type.isArray()) {
                 Class<?> componentType = type.getComponentType();
                 int maxIndex = detectMaxIndex(p.getName(), req.getParameterMap());
                 Object array = Array.newInstance(componentType, maxIndex + 1);
-
                 for (int j = 0; j <= maxIndex; j++) {
                     String prefix = p.getName() + "[" + j + "]";
                     Object element = DataBinder.bindComplexObject(componentType, prefix, req.getParameterMap());
                     Array.set(array, j, element);
                 }
                 value = array;
-            }
-            else if (isComplexObject(type)) {
+            } else if (isComplexObject(type)) {
                 value = DataBinder.bindComplexObject(type, p.getName(), req.getParameterMap());
-            }
-            else {
-                // Récupération générique depuis les paramètres POST
+            } else {
                 String param = req.getParameter(p.getName());
                 if (param != null) value = convert(param, type);
             }
-
+        
             if (value == null) value = defaultValue(type);
             args[i] = value;
         }
+    
         return args;
     }
+
+
+
+
+
+
 
     /** Détecte le plus grand index présent dans paramMap pour un tableau donné */
     private int detectMaxIndex(String paramName, Map<String, String[]> paramMap) {
@@ -190,50 +251,72 @@ public class FrontServlet extends HttpServlet {
         return "";
     }
 
-    private void handleReturn(Object result, HttpServletRequest req, HttpServletResponse res, Method method)
+    private void handleReturn(ControllerResult cr,
+                              HttpServletRequest req,
+                              HttpServletResponse res,
+                              Method method)
             throws IOException, ServletException {
 
+        Object result = cr.returnValue();
+        Object[] args = cr.args();
+
+        /* ================= JSON ================= */
         if (method.isAnnotationPresent(Json.class)) {
-            // Tout sauf ModelView → JSON
+
             res.setContentType("application/json;charset=UTF-8");
             res.setCharacterEncoding("UTF-8");
 
-            Map<String, Object> responseMap = new LinkedHashMap<>();
-            responseMap.put("status", "success");
-            responseMap.put("code", 200);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "success");
+            response.put("code", 200);
 
-            if (result instanceof List) {
-                List<?> list = (List<?>) result;
-                Map<String, Object> data = new LinkedHashMap<>();
-                data.put("count", list.size());
-                data.put("result", list);
-                responseMap.put("data", data);
-            } else {
-                responseMap.put("data", result);
+            /* ===== arguments ===== */
+            Parameter[] params = method.getParameters();
+            Map<String, Object> argsMap = new LinkedHashMap<>();
+
+            for (int i = 0; i < params.length; i++) {
+                argsMap.put(params[i].getName(), args[i]);
             }
 
-            Gson gson = new GsonBuilder().serializeNulls().create();
-            res.getWriter().print(gson.toJson(responseMap));
+            response.put("args", argsMap);
 
+            /* ===== data ===== */
+            Object data;
+
+            if (result instanceof ModelView mv) {
+                data = mv.getData();
+            }
+            else if (result instanceof List<?> list) {
+                Map<String, Object> listData = new LinkedHashMap<>();
+                listData.put("count", list.size());
+                listData.put("result", list);
+                data = listData;
+            }
+            else {
+                data = result;
+            }
+
+            response.put("data", data);
+
+            Gson gson = new GsonBuilder().serializeNulls().create();
+            res.getWriter().print(gson.toJson(response));
             return;
         }
 
-        // Sinon traitement normal (ModelView ou String)
+        /* ================= JSP / NORMAL ================= */
         if (result instanceof String) {
             res.getWriter().print(result);
-        } 
-        else if (result instanceof ModelView) {
-
-        if (result instanceof ModelView) {
-            ModelView mv = (ModelView) result;
-
+        }
+        else if (result instanceof ModelView mv) {
             mv.getData().forEach(req::setAttribute);
             req.getRequestDispatcher("/views/" + mv.getView()).forward(req, res);
- 
         }
-            res.getWriter().println("Type de retour non supporte : " + result);
+        else {
+            res.getWriter().println("Type de retour non supporté : " + result);
         }
     }
+
+
 
 
     private void defaultServe(HttpServletRequest req, HttpServletResponse res)
