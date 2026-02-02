@@ -10,8 +10,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import jakarta.servlet.*;
+import jakarta.servlet.annotation.MultipartConfig;
 import jakarta.servlet.http.*;
 
+@MultipartConfig
 public class FrontServlet extends HttpServlet {
 
     private RequestDispatcher defaultDispatcher;
@@ -32,7 +34,41 @@ public class FrontServlet extends HttpServlet {
         else customServe(req, res);
     }
 
-    private void customServe(HttpServletRequest req, HttpServletResponse res) throws IOException, ServletException {
+    private void customServe(HttpServletRequest req, HttpServletResponse res)
+            throws IOException, ServletException {
+
+        prepareResponse(res);
+
+        String url = extractUrl(req);
+        boolean found = false;
+
+        List<Class<?>> controllers =
+                AnnotationScanner.getAnnotatedClasses("com.test.controllers", Controller.class);
+
+        for (Class<?> clazz : controllers) {
+
+            Method method = resolveMethod(clazz, req, url);
+            if (method == null) continue;
+
+            found = true;
+
+            try {
+                ControllerResult cr = processControllerMethod(clazz, method, req, res, url);
+                handleReturn(cr, req, res, method);
+
+            } catch (Exception e) {
+                e.printStackTrace(res.getWriter());
+                return;
+            }
+        }
+
+        if (!found)
+            res.getWriter().println("<p>Aucune methode pour l URL : " + url + "</p>");
+    }
+
+    /* ---------------- METHODES SEPARÉES ---------------- */
+
+    private void prepareResponse(HttpServletResponse res) {
         res.setContentType("text/html; charset=UTF-8");
         res.setCharacterEncoding("UTF-8");
     }
@@ -57,151 +93,234 @@ public class FrontServlet extends HttpServlet {
         return m;
     }
 
-    private Object processControllerMethod(Class<?> clazz, Method method,
-                                           HttpServletRequest req,
-                                           HttpServletResponse res,
-                                           String url) throws Exception {
+    private ControllerResult processControllerMethod(Class<?> clazz,
+                                                     Method method,
+                                                     HttpServletRequest req,
+                                                     HttpServletResponse res,
+                                                     String url) throws Exception {
 
         Object instance = clazz.getDeclaredConstructor().newInstance();
         Object[] args = resolveMethodArguments(method, req, url);
-        return method.invoke(instance, args);
+        Object result = method.invoke(instance, args);
+
+        return new ControllerResult(result, args);
     }
 
-    private Object[] resolveMethodArguments(Method method, HttpServletRequest req, String url) throws Exception {
 
+    private Object[] resolveMethodArguments(Method method, HttpServletRequest req, String url) throws Exception {
         Parameter[] params = method.getParameters();
         Object[] args = new Object[params.length];
-
+    
         String pattern = getUrlPattern(method);
         Map<String, String> pathVariables = extractPathVariables(pattern, url);
-
+    
+        boolean isMultipart = req.getContentType() != null &&
+                req.getContentType().toLowerCase().startsWith("multipart/");
+    
+        Map<String, Part> partsMap = new HashMap<>();
+        Map<String, byte[]> bytesMap = new HashMap<>();
+    
+        // ✅ Dossier uploads persistant dans le projet (pas le tmp de Tomcat)
+        File projectDir = new File(System.getProperty("user.dir"));
+        File uploadDir = new File(projectDir, "uploads");
+        if (!uploadDir.exists()) uploadDir.mkdirs();
+    
+        if (isMultipart) {
+            for (Part p : req.getParts()) {
+                String originalName = p.getSubmittedFileName();
+                if (originalName != null) {
+                    // Nettoyage du nom
+                    String cleanName = originalName.replaceAll("[^a-zA-Z0-9\\.\\-_]", "_");
+                    // Nom unique pour éviter les conflits
+                    String finalName = System.currentTimeMillis() + "_" + cleanName;
+                    File fileOnDisk = new File(uploadDir, finalName);
+                
+                    // ⚡ Sauvegarde physique du fichier
+                    try (InputStream is = p.getInputStream();
+                         OutputStream os = new FileOutputStream(fileOnDisk)) {
+                        byte[] buffer = new byte[8192];
+                        int len;
+                        while ((len = is.read(buffer)) > 0) {
+                            os.write(buffer, 0, len);
+                        }
+                    }
+                
+                    // Remplace Part par le fichier sur disque si nécessaire
+                    partsMap.put(p.getName(), p);
+                }
+            
+                // Stockage en mémoire (byte[]) pour Map<String, byte[]>
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try (InputStream is = p.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int len;
+                    while ((len = is.read(buffer)) > 0) {
+                        baos.write(buffer, 0, len);
+                    }
+                }
+                bytesMap.put(p.getName(), baos.toByteArray());
+            }
+        }
+    
+        // Traitement des paramètres de la méthode
         for (int i = 0; i < params.length; i++) {
-
-            if (method != null) {
-                found = true;
-                try {
-                    Object instance = clazz.getDeclaredConstructor().newInstance();
-                    Parameter[] params = method.getParameters();
-                    Object[] args = new Object[params.length];
-
-                    // Récupérer les variables {var} depuis l'URL
-                    String urlPattern;
-                    if (method.isAnnotationPresent(URL.class)) {
-                        urlPattern = method.getAnnotation(URL.class).url();
-                    } else if (method.isAnnotationPresent(GetMapping.class)) {
-                        urlPattern = method.getAnnotation(GetMapping.class).value();
-                    } else if (method.isAnnotationPresent(PostMapping.class)) {
-                        urlPattern = method.getAnnotation(PostMapping.class).value();
-                    } else {
-                        urlPattern = url; // fallback
+            Parameter p = params[i];
+            Class<?> type = p.getType();
+            Object value = null;
+        
+            if (Map.class.isAssignableFrom(type) && !isMultipart) {
+                value = buildMapParam(req);
+            } else if (type == Part.class && isMultipart) {
+                value = partsMap.get(p.getName());
+            } else if (type == Part[].class && isMultipart) {
+                List<Part> list = new ArrayList<>();
+                for (String key : partsMap.keySet()) {
+                    if (key.equals(p.getName()) || key.startsWith(p.getName() + "[")) {
+                        list.add(partsMap.get(key));
                     }
-
-                    // 3 – Exécution de la méthode du contrôleur
-                    // Sprint 6 : injection sécurisée des arguments depuis request
-                    // Récupération des variables dynamiques de l'URL
-                    Parameter[] params = method.getParameters();
-                    Object[] args = new Object[params.length];
-
-                    // Récupérer les variables {var} depuis l'URL
-                    String urlPattern;
-                    if (method.isAnnotationPresent(URL.class)) {
-                        urlPattern = method.getAnnotation(URL.class).url();
-                    } else if (method.isAnnotationPresent(GetMapping.class)) {
-                        urlPattern = method.getAnnotation(GetMapping.class).value();
-                    } else if (method.isAnnotationPresent(PostMapping.class)) {
-                        urlPattern = method.getAnnotation(PostMapping.class).value();
-                    } else {
-                        urlPattern = url; // fallback
-                    }
-
-                    Map<String, String> pathVariables = extractPathVariables(urlPattern, url);
-
-                    for (int i = 0; i < params.length; i++) {
-                        Parameter p = params[i];
-                        Class<?> type = p.getType();
-                        Object value = null;
-                    
-                        // 1️⃣ Priorité : {var} dans l'URL
-                        if (pathVariables.containsKey(p.getName())) {
-                            value = convert(pathVariables.get(p.getName()), type);
-                        }
-                    
-                        // 2️⃣ Priorité : @RequestParam
-                        if (value == null && p.isAnnotationPresent(com.framework.annotation.RequestParam.class)) {
-                            String key = p.getAnnotation(com.framework.annotation.RequestParam.class).value();
-                            String raw = req.getParameter(key);
-                            if (raw != null) value = convert(raw, type);
-                        }
-                    
-                        // 3️⃣ Valeur par défaut
-                        if (value == null) {
-                            if (type == int.class) value = 0;
-                            else if (type == double.class) value = 0.0;
-                            else if (type == float.class) value = 0f;
-                            else if (type == boolean.class) value = false;
-                            else value = null;
-                        }
-                    
-                        args[i] = value;
-                    }
-
-
-                    // Appel de la méthode avec les arguments sécurisés
-                    Object result = method.invoke(instance, args);
-
-                        args[i] = value;
-                    }
-
-                    Object result = method.invoke(instance, args);
-
-                    // Gestion du retour
-                    if (result instanceof String) {
-                        res.getWriter().print((String) result);
-                        return;
-                    } else if (result instanceof ModelView) {
-                        ModelView mv = (ModelView) result;
-                        String viewName = mv.getView();
-
-                        for (String key : mv.getData().keySet()) {
-                            req.setAttribute(key, mv.getData().get(key));
-                        }
-
-                        RequestDispatcher dispatcher = req.getRequestDispatcher("/views/" + viewName);
-                        dispatcher.forward(req, res);
-                        return;
-                    } else {
-                        res.getWriter().println("⚠️ Type de retour non supporté : " + result);
-                        return;
-                    }
-
-                } catch (Exception e) {
-                    e.printStackTrace(res.getWriter());
-                    return;
+                }
+                value = list.toArray(new Part[0]);
+            } else if (type == Map.class && isMultipart) {
+                value = bytesMap;
+            } else if (pathVariables.containsKey(p.getName())) {
+                value = convert(pathVariables.get(p.getName()), type);
+            } else if (p.isAnnotationPresent(RequestParam.class)) {
+                value = convert(req.getParameter(p.getAnnotation(RequestParam.class).value()), type);
+            } else if (type.isArray()) {
+                Class<?> componentType = type.getComponentType();
+                int maxIndex = detectMaxIndex(p.getName(), req.getParameterMap());
+                Object array = Array.newInstance(componentType, maxIndex + 1);
+                for (int j = 0; j <= maxIndex; j++) {
+                    String prefix = p.getName() + "[" + j + "]";
+                    Object element = DataBinder.bindComplexObject(componentType, prefix, req.getParameterMap());
+                    Array.set(array, j, element);
                 }
                 value = array;
-            }
-            else if (isComplexObject(type)) {
+            } else if (isComplexObject(type)) {
                 value = DataBinder.bindComplexObject(type, p.getName(), req.getParameterMap());
-            }
-            else {
-                // Récupération générique depuis les paramètres POST
+            } else {
                 String param = req.getParameter(p.getName());
                 if (param != null) value = convert(param, type);
             }
-
+        
             if (value == null) value = defaultValue(type);
             args[i] = value;
         }
+    
         return args;
     }
 
-        if (!found) {
-            res.getWriter().println("<p>Aucune methode ou classe associee à l URL : " + url + "</p>");
+
+
+
+
+
+
+    /** Détecte le plus grand index présent dans paramMap pour un tableau donné */
+    private int detectMaxIndex(String paramName, Map<String, String[]> paramMap) {
+        int max = -1;
+        for (String key : paramMap.keySet()) {
+            if (key.startsWith(paramName + "[")) {
+                int i1 = key.indexOf("[") + 1;
+                int i2 = key.indexOf("]");
+                int idx = Integer.parseInt(key.substring(i1, i2));
+                if (idx > max) max = idx;
+            }
         }
         return max;
     }
 
-    private void defaultServe(HttpServletRequest req, HttpServletResponse res) throws ServletException, IOException {
+
+    private boolean isComplexObject(Class<?> type) {
+        return !type.isPrimitive()
+                && type != String.class
+                && !Number.class.isAssignableFrom(type)
+                && !Map.class.isAssignableFrom(type);
+    }
+
+    private Map<String, Object> buildMapParam(HttpServletRequest req) {
+        Map<String, Object> map = new HashMap<>();
+        req.getParameterMap().forEach((k, v) -> map.put(k, v.length == 1 ? v[0] : v));
+        return map;
+    }
+
+    private String getUrlPattern(Method method) {
+        if (method.isAnnotationPresent(URL.class)) return method.getAnnotation(URL.class).url();
+        if (method.isAnnotationPresent(GetMapping.class)) return method.getAnnotation(GetMapping.class).value();
+        if (method.isAnnotationPresent(PostMapping.class)) return method.getAnnotation(PostMapping.class).value();
+        return "";
+    }
+
+    private void handleReturn(ControllerResult cr,
+                              HttpServletRequest req,
+                              HttpServletResponse res,
+                              Method method)
+            throws IOException, ServletException {
+
+        Object result = cr.returnValue();
+        Object[] args = cr.args();
+
+        /* ================= JSON ================= */
+        if (method.isAnnotationPresent(Json.class)) {
+
+            res.setContentType("application/json;charset=UTF-8");
+            res.setCharacterEncoding("UTF-8");
+
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "success");
+            response.put("code", 200);
+
+            /* ===== arguments ===== */
+            Parameter[] params = method.getParameters();
+            Map<String, Object> argsMap = new LinkedHashMap<>();
+
+            for (int i = 0; i < params.length; i++) {
+                argsMap.put(params[i].getName(), args[i]);
+            }
+
+            response.put("args", argsMap);
+
+            /* ===== data ===== */
+            Object data;
+
+            if (result instanceof ModelView mv) {
+                data = mv.getData();
+            }
+            else if (result instanceof List<?> list) {
+                Map<String, Object> listData = new LinkedHashMap<>();
+                listData.put("count", list.size());
+                listData.put("result", list);
+                data = listData;
+            }
+            else {
+                data = result;
+            }
+
+            response.put("data", data);
+
+            Gson gson = new GsonBuilder().serializeNulls().create();
+            res.getWriter().print(gson.toJson(response));
+            return;
+        }
+
+        /* ================= JSP / NORMAL ================= */
+        if (result instanceof String) {
+            res.getWriter().print(result);
+        }
+        else if (result instanceof ModelView mv) {
+            mv.getData().forEach(req::setAttribute);
+            req.getRequestDispatcher("/views/" + mv.getView()).forward(req, res);
+        }
+        else {
+            res.getWriter().println("Type de retour non supporté : " + result);
+        }
+    }
+
+
+
+
+    private void defaultServe(HttpServletRequest req, HttpServletResponse res)
+            throws ServletException, IOException {
         defaultDispatcher.forward(req, res);
     }
 
