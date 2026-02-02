@@ -82,10 +82,10 @@ public class FrontServlet extends HttpServlet {
 
     private Method resolveMethod(Class<?> clazz, HttpServletRequest req, String url) {
 
-        Method m = AnnotationScanner.findMethodByUrl(clazz, URL.class, url);
+        List<Class<?>> annotatedClasses = AnnotationScanner.getAnnotatedClasses("com.test.controllers", Controller.class);
 
-        if (m == null && req.getMethod().equalsIgnoreCase("GET"))
-            m = AnnotationScanner.findMethodByUrl(clazz, GetMapping.class, url);
+        for (Class<?> clazz : annotatedClasses) {
+            Method method = null;
 
         if (m == null && req.getMethod().equalsIgnoreCase("POST"))
             m = AnnotationScanner.findMethodByUrl(clazz, PostMapping.class, url);
@@ -324,22 +324,14 @@ public class FrontServlet extends HttpServlet {
         defaultDispatcher.forward(req, res);
     }
 
-    private Object convert(String raw, Class<?> type) {
+    private Object convert(String rawValue, Class<?> type) {
         try {
-            if (type == String.class) return raw;
-            if (type == int.class || type == Integer.class) return Integer.parseInt(raw);
-            if (type == double.class || type == Double.class) return Double.parseDouble(raw);
-            if (type == float.class || type == Float.class) return Float.parseFloat(raw);
-            if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(raw);
+            if (type == String.class) return rawValue;
+            if (type == int.class || type == Integer.class) return Integer.parseInt(rawValue);
+            if (type == double.class || type == Double.class) return Double.parseDouble(rawValue);
+            if (type == float.class || type == Float.class) return Float.parseFloat(rawValue);
+            if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(rawValue);
         } catch (Exception e) {}
-        return null;
-    }
-
-    private Object defaultValue(Class<?> t) {
-        if (t == int.class) return 0;
-        if (t == double.class) return 0.0;
-        if (t == float.class) return 0f;
-        if (t == boolean.class) return false;
         return null;
     }
 
@@ -355,7 +347,6 @@ public class FrontServlet extends HttpServlet {
             int i = 1;
             while (mNames.find()) vars.put(mNames.group(1), m.group(i++));
         }
-
         return vars;
     }
 }
